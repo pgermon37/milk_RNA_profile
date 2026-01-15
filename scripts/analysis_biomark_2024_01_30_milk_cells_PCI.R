@@ -1,35 +1,27 @@
 #libraries####
 {
-#library(edgeR)
-library(ggplot2)
-library(RColorBrewer)
-#", lib.loc="/Library/Frameworks/R.framework/Versions/3.4/Resources/library")
-library(lattice)
-#", lib.loc="/Library/Frameworks/R.framework/Versions/3.4/Resources/library")
-library(reshape2)
-# library(ComplexHeatmap)
-library(pheatmap)
-#library(mixOmics)
-library(plyr)
-library(knitr)
-#library(gage)
-#library(gageData)
-library(gplots)
-#library("AnnotationHub")
-library(circlize)
-library(FactoMineR)
-library("factoextra")
-library("corrplot")
-library(readxl)
-library(ggplot2)
-# library(sqldf) # utilise X11
-library(lubridate)
-library(dplyr)
-library(tidyr)
-library(here)
-library(stringr)
-library(tidyverse)
-library(writexl)
+  library(ggplot2)
+  library(RColorBrewer)
+  library(lattice)
+  library(reshape2)
+  library(pheatmap)
+  library(plyr)
+  library(knitr)
+  library(gplots)
+  library(circlize)
+  library(FactoMineR)
+  library(factoextra)
+  library(corrplot)
+  library(readxl)
+  library(ggplot2)
+  library(lubridate)
+  library(dplyr)
+  library(tidyr)
+  library(here)
+  library(stringr)
+  library(tidyverse)
+  library(writexl)
+  library(psych)
 }
 
 ####Load tables####
@@ -222,10 +214,7 @@ table_log_fc$Name <- gsub("_2","",table_log_fc$Name)
 {
 table_analyse <- table_log_fc
   
-####aggrégation des dupliqués dans la table_log_FC####
-
-#après avoir vérifié que les duplicats sont clusterisés ensemble, je fais la moyenne pour les dupliqués
-
+####aggregate duplicates in table_log_FC####
 
 table_analyse_agg <- aggregate(table_log_fc[,!is.element(colnames(table_log_fc),
                                                          c("Quartier","Name", "Date",
