@@ -444,7 +444,7 @@ ind <- get_pca_ind(res.pca)
 
 # color <- table_analyse$SCS
 # color <- table_analyse$Macrophage
-color <- as.factor(table_analyse$Cluster_3_samples)
+color <- as.factor(table_analyse$Cluster_4_samples)
 # color <- as.factor(table_analyse$Type)
 
 
@@ -458,7 +458,7 @@ pca_ind_plot <- fviz_pca_ind(res.pca,
              # fill.ind=color,
              # gradient.cols = c("green","blue","burlywood1","yellow"),
              # palette = c("blue","green","red"),
-             palette = c("blue","burlywood1","red"),
+             palette = c("blue","cyan","burlywood1","red"),
              repel = TRUE, # Avoid text overlapping (slow if many points)
              addEllipses = T,
              ellipse.type = "confidence",
