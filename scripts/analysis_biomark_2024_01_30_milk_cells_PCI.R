@@ -80,6 +80,9 @@
   export1 <- export %>%
     filter(!str_detect(Name,"ANSES"))
   
+  #remove TXNRD1 samples####
+  export1 <- export1 %>%
+    filter(!str_detect(Gene,"TXNRD1"))
   
   #add Tm column for genes studied####
   export2  <-  export1 %>%
@@ -387,8 +390,8 @@ table_analyse <- table_log_fc_agg
                 main=titre
                 
   )
-  tiff("Figure_XX_heatmap_milk_samples_1.tif", width = 1500, height = 1100, units = "px",compression = c("none"))
-  # pdf("Figure_XX_heatmap_milk_samples.pdf", 16,12)
+
+  pdf("Figure_XX_heatmap_milk_samples.pdf", 16,12)
   print(p)
   dev.off()
   
@@ -422,8 +425,10 @@ table_analyse <- table_log_fc_agg
                                                  "Neutrophile", "CCS",                                              
                                                  "Total", "Serie", "jours_lait"
                                                ))]
+# restriction to specified set
+  matrix_pca <- matrix_heatmap[,c(is.element(colnames(matrix_heatmap),clusters_pop_sep$Gene[is.element(clusters_pop_sep$Nom,c("Macro","Lc", "PMN2"))]))]
   
-  matrix_pca <- cbind(matrix_heatmap, table_analyse[,c("Total","CCS", "Neutrophile","Lymphocyte","Macrophage")])
+  matrix_pca <- cbind(matrix_pca, table_analyse[,c("Total","CCS", "Neutrophile","Lymphocyte","Macrophage")])
   
   rownames(matrix_pca) <- paste0(table_analyse$Quartier,"_",table_analyse$Type, "_", table_analyse$Name)
   
@@ -478,8 +483,8 @@ pca_ind_plot <- fviz_pca_ind(res.pca,
         legend.text = element_text(size=15)
   )
 }
-# pdf("Figure_XX_PCA_gene_expression_percent_macrophages.pdf",12,12)
-tiff("Figure_XX_PCA_gene_expression_percent_macrophages.tiff", width = 600, height = 600, units = "px")
+
+pdf("Figure_XX_PCA_gene_expression_percent_macrophages.pdf",12,12)
 pca_ind_plot
 dev.off()
 
