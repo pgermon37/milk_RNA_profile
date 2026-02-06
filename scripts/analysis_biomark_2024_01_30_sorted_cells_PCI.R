@@ -71,8 +71,11 @@ colnames(export) <- c("chamber",
 {
   #remove non relevant samples####
   export1 <- export %>%
-  filter(!str_detect(Name,"ANSES"))
-
+    filter(!str_detect(Name,"ANSES"))
+  
+  #remove TXNRD1 samples####
+  export1 <- export1 %>%
+    filter(!str_detect(Gene,"TXNRD1"))
 
   #add Tm column for genes studied####
   export2  <-  export1 %>%
