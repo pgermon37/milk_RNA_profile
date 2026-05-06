@@ -1,0 +1,1234 @@
+---
+title: "Gene expression profiling of bovine raw milk as a new tool to monitor the inflammatory status of the udder : a pilot study"
+author: "Pierre Germon"
+date: "2026-04-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Loading of libraries
+
+```{r libraries, message = F, warning = F}
+library(ggplot2)
+library(RColorBrewer)
+library(lattice)
+library(reshape2)
+library(pheatmap)
+library(plyr)
+library(knitr)
+library(gplots)
+library(circlize)
+library(FactoMineR)
+library(factoextra)
+library(corrplot)
+library(readxl)
+library(ggplot2)
+library(lubridate)
+library(dplyr)
+library(tidyr)
+library(here)
+library(stringr)
+library(tidyverse)
+library(writexl)
+library(readxl)
+library(psych)
+library(dendextend) # for dendrogram analyses
+library(DescTools) # for LRT test
+library(ggpubr)
+```
+
+## Setting the current working directory
+Update the code below to set the current working directory to the directory that contains all the required files (raw data, metadata,...)
+
+```{r warning = F}
+
+# main working directory
+wd <- c("/Users/pgermon/Documents/Divers_labo/Publis/2024_Gitton/Soumission_PLOS_ONE/R_markdown_doc")
+
+#get date
+date <- as.character(Sys.Date())
+figure_directory <- paste0(wd,"/Figures_",date)
+table_directory <- paste0(wd,"/New_tables_", date)
+
+#directory original data
+wd_sorted_cells_data <- paste0(wd,"/Raw_data_and_metadata/Sorted_cells")
+wd_milk_samples_data <- paste0(wd,"/Raw_data_and_metadata/Milk_samples")
+
+# create a repertoire to store files resulting from the analyses
+dir.create(figure_directory)
+
+#create a repertoire to store tables
+dir.create(table_directory)
+
+```
+
+## Part one: selection of cell-type specific genes
+### Loading the data
+We need to load the raw data file exported from the Fluidigm Data Analysis software. The data was exported as csv file and converted to .xlsx file.
+
+
+```{r loading data and metadata files, echo = T, warning = T, message = F}
+#set the working directory to the Sorted_cells folder
+setwd(wd_sorted_cells_data)
+
+#raw BiomarkHD results
+export <- read_xlsx("Raw_data_ct_sorted_cells.xlsx")
+
+#files containg the Tm values for each analyzed gene
+table_Tm<-read_xlsx("Table_tm_sorted_cells.xlsx")
+
+#description of samples####
+description <- read_xlsx("Description_sorted_cells.xlsx")
+
+#metadata table containing cell count results, cow data and bacteriology analyses####
+comptages <- read_xlsx(paste0(wd_milk_samples_data,"/Supplementary_table_S1_milk_samples.xlsx"))
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+### Cleaning raw data file
+The different steps are to add the description of the samples to the raw data file.
+Then the theoretical Tm value is added to the table for further calculations. Genes for which a Tm could not be determined are removed.
+Samples with Tm outside of a +/- 0.7° window from the theoretical Tm are removed.
+The number of retained genes is indicated.
+
+```{r}
+#merge table ct and sample description
+  export1 <-  export %>%
+    left_join(description, by=c('Name'))
+
+#add Tm column for genes studied####
+export2  <-  export1 %>%
+  left_join(table_Tm, by=c('Gene'))
+
+#remove samples with no Tm####
+export3 <- export2 %>%
+  filter(export2$Tm!="ND")
+export3$Tm <- as.numeric(export3$Tm)
+
+# first filter : determine samples Tm within the range of +/- 0.7° of correct Tm####
+export4 <- export3 %>%
+  mutate(tm_max = Tm + 0.7) %>%
+  filter(!tm_in > tm_max) %>%
+  mutate(tm_min = Tm - 0.7) %>%
+  filter(!tm_in < tm_min)
+
+# print the number of genes in the table
+print(length(levels(factor(export4$Gene))))
+
+```
+
+### Selection of Samples with sufficient data
+In order to run a suitable analysis, only samples with less than 10% missing data are retained.
+
+```{r}
+nb_echantillons <- length(levels(factor(export4$Name)))
+
+#select genes with less than 10% missing values####
+list_gene_ct999 <- export4 %>%
+  count(Gene, ct==999) %>%
+  rename("ct999"=c(2)) %>%
+  filter(!n< nb_echantillons*0.9) %>%
+  mutate(ct999=as.factor(ct999)) %>%
+  filter(!ct999==TRUE)
+
+export5 <- export4 %>%
+  semi_join(list_gene_ct999, by=c('Gene')) 
+
+```
+
+A new table is created arranged by sample and genes and missing Ct values are adjusted: for each gene, missing value is given the Ct value higher of the (highest Ct for this gene +1 ).
+
+```{r}
+#simplified table containing only sample names, gene names and Ct values####
+table_simplifiee <- export5[,c("Name","Gene", "ct")]
+
+#list of all genes retained for analysis
+liste_genes <- levels(factor(table_simplifiee$Gene))
+
+table_ct <- table_simplifiee %>%
+  pivot_wider(names_from = Gene, values_from = ct)
+
+#adjust missing Ct values for a gene to max(Ct) +1 ####
+for (i in (2:ncol(table_ct))) {
+  # i <- 23
+  max <- max(table_ct[i][!is.na(table_ct[i])])
+  table_ct[i][is.na(table_ct[i])] <- max +1
+}
+```
+
+
+### Calculation of fold-changes
+Then a control sample is calculated and used for calculation of FC and log2FC according to 'https://toptipbio.com/qpcr-multiple-reference-genes/'
+
+```{r echo = T, warning = T, message = T}
+# reference sample
+  moyenne <- sapply(table_ct[,2:ncol(table_ct)],mean, na.rm=T)
+  control<-c("CTRL",moyenne)
+  
+  
+  #a matrix with all ct values is created
+  matrice <- data.frame(table_ct[,2:ncol(table_ct)])
+  
+  #and each value is converted to numerics
+  matrice[,1:ncol(matrice)] <- apply(matrice[,1:ncol(matrice)], 2, function(x)  as.numeric(as.character(x)))
+  
+  #∆Ct calculation
+  matrice_delta_ct <- -sweep(matrice,2,moyenne)
+  
+  #matrix of RQ
+  matrice_RQ <- sapply(matrice_delta_ct, function(x) 2^x)
+  row.names(matrice_RQ) <- table_ct$Name
+  
+  
+  #Calculate the geometric mean of the reference genes RQ values
+  genes_REF<-c("ACTB","GAPDH")
+  matrice_RQ_ref <- matrice_RQ[,genes_REF]
+  
+  RQ_geom_mean <- geometric.mean(t(matrice_RQ_ref), na.rm=T)
+  
+  matrice_RQ_geom <- matrice_RQ / RQ_geom_mean
+  
+  table_fc <- data.frame("Name"=rownames(matrice_RQ_geom), matrice_RQ_geom)
+  
+  table_log_fc <- data.frame("Name" = rownames(matrice_RQ_geom), log2(matrice_RQ_geom))
+  
+  head(table_log_fc[,1:5])
+```
+
+The description of samples is added to the `table_fc` and `table_log_fc`. The log2FC table is written to an excel file.
+
+```{r}
+#add description to table_log_fc####
+table_log_fc <- merge(table_log_fc, description, by="Name")
+
+#add cell counts####
+table_log_fc <- merge(table_log_fc, comptages, by="Quarter")
+
+
+#definition table####
+
+table_sorted_cells <- table_log_fc
+
+
+write_xlsx(table_sorted_cells, paste0(table_directory,"/table_log2FC_sorted_cells.xlsx"))
+
+```
+
+
+### Identification of genes differentially expressed between the three cell types
+Genes expressed differently between cell types are identified using a Kruskall-Wallis test.
+
+```{r}
+#a new variable is created with the cell type of each sample
+type <- table_sorted_cells$Type
+
+# a function is created to calculate p-value (Kruskall-Wallis test)
+p_values_KW <- function(gene){
+  kruskal.test(gene ~ type)$p.value
+}
+
+table_p_KW <- sapply(table_sorted_cells[, is.element(colnames(table_sorted_cells),liste_genes)], FUN = p_values_KW)
+table_p_KW <- data.frame(Name = names(table_p_KW), p_value = table_p_KW)
+
+#list of genes differentially expressed
+table_dif_KW <- table_p_KW[table_p_KW$p_value < 0.05,]
+gene_dif_KW <- table_p_KW$Name[table_p_KW$p_value < 0.05]
+
+#the list is written to an excel file
+write_xlsx(table_dif_KW, paste0(table_directory,"/liste_genes_diff_KW.xlsx"))
+
+# number of genes differentially expressed between cell types
+paste0("The number of genes selected in the table_log_fc table is ",length(gene_dif_KW))
+
+```
+
+
+### Figure 1A: Representation as a heatmap of the log2FC of the differentially expressed genes
+
+The log2FC values for the genes identified as differentially expressed are retrived in a new matrix `matric_heatmap`.
+
+```{r}
+#heatmap of log2FC for genes identified as differentially expressed
+matrix_heatmap <- table_sorted_cells[,is.element(colnames(table_sorted_cells),gene_dif_KW)]
+
+rownames(matrix_heatmap) <- paste0(table_sorted_cells$Quarter,"_",table_sorted_cells$Type)
+
+myBreaks <- c(seq(-3, 3,by=0.1))
+paletteLength<-length(myBreaks)
+myColor <- colorRampPalette(c("blue","white","red"))(paletteLength)
+
+annotation_row <- data.frame(
+  CCS=log2(table_sorted_cells$CCS /100)+3,
+  Type = factor(table_sorted_cells$Type)
+)
+
+rownames(annotation_row) <- paste0(table_sorted_cells$Quarter,"_",table_sorted_cells$Type)
+
+labs.row <- rownames(matrix_heatmap)
+
+matrix_heatmap <- scale(matrix_heatmap)
+
+p_sorted_cells <- pheatmap(matrix_heatmap,
+              # cluster_rows = F,
+              cutree_cols = 3,
+              cutree_rows = 3,
+              clustering_method = "ward.D",
+              clustering_distance_cols = "correlation",
+              clustering_distance_rows = "correlation",
+              # annotation_colors = ann_colors,
+              annotation_row = annotation_row,
+              breaks = myBreaks,
+              legend_breaks = c(-3,0,3),
+              
+              fontsize_row = 14,
+              fontsize_col = 10,
+              fontsize = 16,
+              
+              color = myColor,
+              labels_row = labs.row,
+              # main=titre
+)
+
+```
+
+The three genes clusters identified by the hierachical clustering are retrieved in a data.frame and saved as an excel file.
+```{r}
+#create table with list of selected genes####
+cluster_genes <- data.frame(Gene = names(cutree(p_sorted_cells$tree_col, k=3)),
+                          Type_gene = cutree(p_sorted_cells$tree_col, k=3))
+cluster_genes$Type_gene <- gsub("1", "Lympho", cluster_genes$Type_gene)
+cluster_genes$Type_gene <- gsub("2", "Neutro", cluster_genes$Type_gene)
+cluster_genes$Type_gene <- gsub("3", "Macro", cluster_genes$Type_gene)
+write_xlsx(cluster_genes, paste0(table_directory,"/Supplementary_table_S3_gene_clusters.xlsx"))
+
+```
+
+The heatmap is then updated to show the gene clusters.
+```{r}
+matrix_heatmap <- table_sorted_cells[,is.element(colnames(table_sorted_cells),gene_dif_KW)]
+
+table_genes <- read_xlsx(paste0(table_directory,"/Supplementary_table_S3_gene_clusters.xlsx"))
+
+rownames(matrix_heatmap) <- paste0(table_sorted_cells$Quarter,"_",table_sorted_cells$Type)
+
+myBreaks <- c(seq(-3, 3,by=0.1))
+paletteLength<-length(myBreaks)
+myColor <- colorRampPalette(c("blue","white","red"))(paletteLength)
+
+ann_colors = list(
+  Gene_clusters = c("Lympho"="blue",
+            "Macro"="green",
+            "Neutro"="red"
+            
+           ),
+  Type = c("Lympho"="blue",
+            "Macro"="green",
+            "Neutro"="red")
+)
+
+
+annotation_row <- data.frame(
+  CCS = log2(table_sorted_cells$CCS /100)+3,
+  Type = factor(table_sorted_cells$Type)
+)
+
+rownames(annotation_row) <- paste0(table_sorted_cells$Quarter,"_",table_sorted_cells$Type)
+
+annotation_col <- data.frame(
+  Gene_clusters = factor(table_genes$Type_gene)
+)
+rownames(annotation_col) <- table_genes$Gene
+
+labs.row <- rownames(matrix_heatmap)
+
+matrix_heatmap <- scale(matrix_heatmap)
+
+p_sorted_cells <- pheatmap(matrix_heatmap,
+              # cluster_rows = F,
+              cutree_cols = 3,
+              cutree_rows = 3,
+              clustering_method = "ward.D",
+              clustering_distance_cols = "correlation",
+              clustering_distance_rows = "correlation",
+              annotation_colors = ann_colors,
+              annotation_row = annotation_row,
+              annotation_col = annotation_col,
+              breaks = myBreaks,
+              legend_breaks = c(-3,0,3),
+              
+              fontsize_row = 14,
+              fontsize_col = 10,
+              fontsize = 16,
+              
+              color = myColor,
+              labels_row = labs.row,
+              # main=titre
+)
+
+```
+
+The new heatmpap is saved to a tiff file.
+```{r}
+
+tiff(paste0(figure_directory,"/Figure_1A_heatmap_sorted_cells.tif"), width = 12, height = 8.5, units = "in", res = 150)
+p_sorted_cells
+dev.off()
+```
+
+### Figure 1B: Representation as a PCA of the log2FC of the differentially expressed genes
+
+The log2FC values for the genes identified as differentially expressed were then alayzed by Principal Component Analysis.
+
+```{r}
+matrix_pca <- table_sorted_cells[,is.element(colnames(table_sorted_cells),gene_dif_KW)]
+
+rownames(matrix_pca) <- paste0(table_sorted_cells$Quarter,"_",table_sorted_cells$Type)
+
+
+library(FactoMineR)
+
+res.pca <- PCA(matrix_pca,
+               graph = F)
+
+eig.val <- get_eigenvalue(res.pca)
+fviz_eig(res.pca, addlabels = TRUE, ylim = c(0, 60))
+ind <- get_pca_ind(res.pca)
+
+
+color <- as.factor(table_sorted_cells$Type)
+
+
+pca_ind_plot <- fviz_pca_ind(res.pca,
+             axes = c(1,2),
+             # pointshape = as.factor(table_analyse$Cluster_4_samples),
+             pointsize = 5,
+             # col.ind = "cos2",
+             col.ind=color,
+             # fill.ind=color,
+             # gradient.cols = c("green","blue","orange","yellow"),
+             palette = c("blue","green","red"),
+             # palette = c("blue","cyan","orange","red"),
+             repel = TRUE, # Avoid text overlapping (slow if many points)
+             addEllipses = T,
+             ellipse.type = "confidence",
+             ellipse.level=0.99,
+             mean.point = FALSE,
+             label = "none",
+             title = " ",
+             legend.title = "Cell types"
+             ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 0, size=20),
+        axis.text.y = element_text(size = 20),
+        axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25),
+        axis.title.x.top = element_text(size = 25),
+        strip.text = element_text(size = 15),
+        legend.title = element_text(size = 20),
+        legend.text = element_text(size = 15)
+  )
+
+tiff(paste0(figure_directory,"/Figure_1B_PCA_cell_triee.tif"), width = 8.5, height = 8.5, units = "in", res = 150)
+pca_ind_plot
+dev.off()
+```
+
+
+## Part two: analysis of milk RNA samples
+
+### Loading of raw data
+Data are loaded.
+```{r}
+#set working directory for milk samples
+setwd(wd_milk_samples_data)
+
+#Tm table####
+table_Tm<-read_xlsx("Table_tm_milk_samples.xlsx")
+
+#description of samples####
+description <- read_xlsx("Description_milk_samples.xlsx")
+
+#cell counts table####
+comptages <- read_xlsx("Supplementary_table_S1_milk_samples.xlsx")
+  
+#raw BiomarkHD results####
+export <- read_xlsx("Raw_data_ct_milk_samples.xlsx")
+
+```
+
+and then cleaned to only keep relevant samples (the original BiomarkHD also includes samples not related to this study). The TXNRD1 primers were not correct so data for this gene are removed.
+
+```{r}
+#remove non relevant samples####
+export1 <- export %>%
+  filter(!str_detect(Name,"ANSES"))
+
+#remove TXNRD1 samples####
+export1 <- export1 %>%
+  filter(!str_detect(Gene,"TXNRD1"))
+
+#add Tm column for genes studied####
+export2  <-  export1 %>%
+  left_join(table_Tm, by=c('Gene'))
+
+#add description column####
+export3  <-  export2 %>%
+  left_join(description, by=c('Name'))
+
+#remove samples with no Tm####
+export4 <- export3 %>%
+  filter(export3$tm_std!="ND")
+export4$tm_std <- as.numeric(export4$tm_std)
+
+# first filter : determine samples Tm within the range of +/- 0.7° of correct Tm####
+export6 <- export4 %>%
+  mutate(tm_max=tm_std + 0.7) %>%
+  filter(!tm_in > tm_max) %>%
+  mutate(tm_min=tm_std - 0.7) %>%
+  filter(!tm_in<tm_min)
+```
+
+
+Only samples from milk RNA are selected. Samples with less than 20% missing values are selected and missing values are corrected. Sample ADNc-349 as it gave aberant values.
+```{r}
+#selection of milk samples only
+analyse <- c("Milk samples")
+quarter_to_keep <- description$Quarter[description$Type=="lait" & !is.na(description$Type)]
+samples_to_keep <- description$Name[is.element(description$Quarter,quarter_to_keep) &
+                                             (description$Type=="lait") &
+                                             description$Extraction!="qiagen" &
+                                             description$Name != "ADNc-349"]
+
+#restrict table to samples to keep####
+export7 <- export6[is.element(export6$Name,samples_to_keep),]
+
+nb_echantillons <- length(levels(factor(export7$Name)))
+
+#select genes with less than 20% missing values####
+list_gene_ct999_bis <- export7 %>%
+  count(Gene, ct==999) %>%
+  rename("ct999"=c(2))
+
+list_gene_ct999 <- export7 %>%
+  count(Gene, ct==999) %>%
+  rename("ct999"=c(2))%>%
+  filter(!n < nb_echantillons*0.8) %>%
+  mutate(ct999=as.factor(ct999)) %>%
+  filter(!ct999==TRUE)
+
+export8 <- export7 %>%
+  semi_join(list_gene_ct999, by=c('Gene')) 
+
+
+#simplified table containing only sample names, gene names and Ct values####
+table_simplifiee <- export8[,c("Name","Gene", "ct")]
+
+
+table_ct <- table_simplifiee %>%
+  pivot_wider(names_from = Gene, values_from = ct)
+
+#adjust missing Ct values for a gene to max(Ct) +1 ####
+for (i in (2:ncol(table_ct))) {
+  # i <- 23
+  max <- max(table_ct[i][!is.na(table_ct[i])])
+  table_ct[i][is.na(table_ct[i])] <- max +1
+}
+```
+
+### Calculation of FC
+FC are calculated from a control sample built from an average of the Ct for each gene.
+
+```{r}
+# reference for DDct https://toptipbio.com/qpcr-multiple-reference-genes/####
+moyenne <- sapply(table_ct[,2:ncol(table_ct)],mean, na.rm=T)
+control<-c("CTRL",moyenne)
+
+
+#creer matrice avec toutes les valeurs
+matrice <- data.frame(table_ct[,2:ncol(table_ct)])
+#convertir tous en nombre
+matrice[,1:ncol(matrice)] <- apply(matrice[,1:ncol(matrice)], 2, function(x) as.numeric(as.character(x)))
+
+#matrice des ∆Ct : retirer la valeur du groupe contrôle, ici geometrique_moyenne
+matrice_delta_ct <- -sweep(matrice,2,moyenne)
+
+#matrice des RQ
+matrice_RQ <- sapply(matrice_delta_ct, function(x) 2^x)
+row.names(matrice_RQ) <- table_ct$Name
+
+
+#Calculate the geometric mean of the reference genes RQ values
+genes_REF<-c("ACTB","GAPDH")
+matrice_RQ_ref <- matrice_RQ[,genes_REF]
+
+RQ_geom_mean <- geometric.mean(t(matrice_RQ_ref), na.rm=T)
+
+matrice_RQ_geom <- matrice_RQ / RQ_geom_mean
+
+table_fc <- data.frame("Name"=rownames(matrice_RQ_geom), matrice_RQ_geom)
+
+table_log_fc <- data.frame("Name"=rownames(matrice_RQ_geom), log2(matrice_RQ_geom))
+```
+
+
+Metadata (description of sample and SCC values) are added to the table of log2FC and the table is stored as an excel file.
+
+```{r}
+table_log_fc <- merge(table_log_fc, description, by="Name")
+table_log_fc <- merge(table_log_fc, comptages, by="Quarter")
+
+
+
+```
+
+
+### Figure 2A: Representation of results as heatmap
+A matrix data is created with only the data for the genes listed in `gene_dif_KW` and selected above as differentially expressed between cell types.
+```{r}
+#restriction to specified set
+matrix_heatmap <- table_log_fc[,is.element(colnames(table_log_fc),gene_dif_KW)]
+rownames(matrix_heatmap) <- table_log_fc$Quarter
+```
+
+The number of genes with sufficient signal and belonging to the list of differentially expressed genes is recorded.
+
+```{r}
+#number of genes in table_log_fc table
+paste0("The number of genes selected in the table_log_fc table is ",ncol(matrix_heatmap))
+```
+
+
+
+
+Color instructions are selected.
+```{r}
+myBreaks <- c(seq(-3, 3,by=0.1))
+paletteLength<-length(myBreaks)
+myColor <- colorRampPalette(c("blue","white","red"))(paletteLength)
+
+ann_colors = list(
+  Gene_clusters = c(
+    "Lympho"="blue",
+    "Macro"="green",
+    "Neutro"="red")
+)
+
+annotation_col <- data.frame(
+  Gene_clusters = factor(cluster_genes$Type_gene)
+)
+rownames(annotation_col) <- cluster_genes$Gene
+
+labs.row<-rownames(matrix_heatmap)
+```
+
+The heatmap is drawn.
+
+```{r}
+titre<-paste0("log2FC ",analyse)
+
+
+matrix_heatmap <- scale(matrix_heatmap)
+
+p_milk_cells <- pheatmap(matrix_heatmap,
+              # cluster_rows = F,
+              cutree_cols = 3,
+              cutree_rows = 4,
+              clustering_method="ward.D",
+              clustering_distance_cols ="correlation",
+              # clustering_distance_rows ="correlation",
+              annotation_colors = ann_colors,
+              annotation_col = annotation_col,
+              breaks=myBreaks,
+              legend_breaks=c(-3,0,3),
+              
+              fontsize = 12,
+              color=myColor,
+              # labels_row = labs.row,
+              main=titre
+              
+)
+
+p_milk_cells
+```
+
+
+Samples clusters are collected from the heatmap above and an excel file is created with the list of samples and the cluster number to which they belong.
+
+```{r}
+clusters_samples <- data.frame(Quarter = names(cutree(p_milk_cells$tree_row, k=4)),
+                               Cluster_sample = cutree(p_milk_cells$tree_row, k=4))
+
+clusters_samples$Cluster_sample_new <- clusters_samples$Cluster_sample
+clusters_samples$Cluster_sample_new[clusters_samples$Cluster_sample == 1] <- 2
+clusters_samples$Cluster_sample_new[clusters_samples$Cluster_sample == 2] <- 1
+clusters_samples$Cluster_sample_new[clusters_samples$Cluster_sample == 3] <- 4
+clusters_samples$Cluster_sample_new[clusters_samples$Cluster_sample == 4] <- 3
+clusters_samples$Cluster_sample <- clusters_samples$Cluster_sample_new
+clusters_samples <- clusters_samples[,1:2]
+
+write_xlsx(clusters_samples, paste0(table_directory,"/Clusters_milk_samples.xlsx"))
+
+```
+
+Heatmap representation of milk samples with the color code based on the clustering.
+
+```{r}
+ann_colors = list(
+    Gene_clusters = c(
+      "Lympho"="blue",
+      "Macro"="green",
+      "Neutro"="red"),
+    Sample_clusters = c("1" = "blue",
+                        "2" = "cyan",
+                        "3" = "burlywood1",
+                        "4" = "red"
+                        # "5" = "yellow",
+                        # "6" = "black",
+                        # "7" = "purple"
+    )
+  )
+  
+annotation_row <- data.frame(
+  Sample_clusters = factor(clusters_samples$Cluster_sample),
+  CCS = log2(table_log_fc$CCS /100) + 3
+  )
+  
+rownames(annotation_row) <- clusters_samples$Quarter
+  
+annotation_col <- data.frame(
+  Gene_clusters = factor(cluster_genes$Type_gene)
+)
+
+rownames(annotation_col) <- cluster_genes$Gene
+  
+labs.row<-rownames(matrix_heatmap)
+
+p_milk_samples <- pheatmap(matrix_heatmap,
+                           cutree_cols = 3,
+                           cutree_rows = 4,
+                           clustering_method="ward.D",
+                           clustering_distance_cols ="correlation",
+                           # clustering_distance_rows ="correlation",
+                           annotation_colors = ann_colors,
+                           annotation_row = annotation_row,
+                           annotation_col = annotation_col,
+                           breaks=myBreaks,
+                           legend_breaks=c(-3,0,3),
+                           fontsize = 12,
+                           color = myColor,
+                           main = titre
+                           )
+```
+
+The heatmap generated is saved to a tiff file.
+
+```{r}
+tiff(paste0(figure_directory,"/Figure_2A_heatmap_milk_samples.tif"), width = 12, height = 8.5, units = "in", res = 150)
+p_milk_samples
+dev.off()
+```
+
+A table containing the different metadata along with the new clustering is created and stored as an excel file.
+
+```{r}
+table_log_fc <- merge(table_log_fc, clusters_samples, by = "Quarter")
+
+write_xlsx(table_log_fc, paste0(table_directory, "/table_log2FC_milk_samples.xlsx"))
+```
+
+### Figure 2C: Statistical analysis of results
+
+A Kruskal-Wallis test is performed on each gene to detect if expression depends on the cluster.
+
+```{r}
+#a new variable is created with the cell type of each sample
+cluster <- table_log_fc$Cluster_sample
+
+# a function is created to calculate p-value (Kruskall-Wallis test)
+p_values_KW_cluster <- function(gene){
+  kruskal.test(gene ~ cluster)$p.value
+}
+
+
+# the Kruskal-Wallis p_value is calculated for each gene
+table_p_KW_clusters <- sapply(table_log_fc[, is.element(colnames(table_log_fc),gene_dif_KW)], FUN = p_values_KW_cluster)
+table_p_KW_clusters <- data.frame(Name = names(table_p_KW_clusters), p_value = table_p_KW_clusters)
+
+
+#a function is created to calculate Mann-Whitney test p-values 2 clusters comparisons 
+p_values_MW_cluster <- function(gene){
+  # gene_1_2 <- gene[cluster == 1 | cluster == 2]
+  # cluster_1_2 <- cluster[cluster == 1 | cluster == 2]
+  p_value_1_2 <- wilcox.test(gene[cluster == 1 | cluster == 2] ~ cluster[cluster == 1 | cluster == 2], exact = T)$p.value
+  p_value_1_3 <- wilcox.test(gene[cluster == 1 | cluster == 3] ~ cluster[cluster == 1 | cluster == 3], exact = T)$p.value
+  p_value_1_4 <- wilcox.test(gene[cluster == 1 | cluster == 4] ~ cluster[cluster == 1 | cluster == 4], exact = T)$p.value
+  p_value_2_3 <- wilcox.test(gene[cluster == 2 | cluster == 3] ~ cluster[cluster == 2 | cluster == 3], exact = T)$p.value
+  p_value_2_4 <- wilcox.test(gene[cluster == 2 | cluster == 4] ~ cluster[cluster == 2 | cluster == 4], exact = T)$p.value
+  p_value_3_4 <- wilcox.test(gene[cluster == 3 | cluster == 4] ~ cluster[cluster == 3 | cluster == 4], exact = T)$p.value
+  
+  
+  
+  return(c(p_value_1_2, p_value_1_3,p_value_1_4, p_value_2_3,  p_value_2_4, p_value_3_4))
+}
+
+#the Mann-Whitney p-value for each gene and each comparison is calculated
+table_p_1_2_clusters <- sapply(table_log_fc[, is.element(colnames(table_log_fc),gene_dif_KW)], FUN = p_values_MW_cluster)
+
+# only comparisons allowed by the Kruskal-Wallis tests are kept
+table_p_1_2_clusters[table_p_KW_clusters > 0.05] <- NA
+
+ordre_genes <- p_milk_samples$tree_col$labels[p_milk_samples$tree_col$order]
+
+table_p_1_2_clusters <- table_p_1_2_clusters[,ordre_genes]
+
+table_p_1_2_clusters[table_p_1_2_clusters > 0.05] <- NA
+
+# for graphic purposes, the opposite of the log(p_value) is calculated and will be represented
+table_p_1_2_clusters <- -log(table_p_1_2_clusters)
+
+rownames(table_p_1_2_clusters) <- c("1_vs_2", "1_vs_3", "1_vs_4", "2_vs_3", "2_vs_4", "3_vs_4")
+
+table_p_1_2_clusters <- cbind(c("1_vs_2", "1_vs_3", "1_vs_4", "2_vs_3", "2_vs_4", "3_vs_4"),data.frame(table_p_1_2_clusters))
+table_p_1_2_clusters_pivot <- pivot_longer(table_p_1_2_clusters, cols = 2:35)
+colnames(table_p_1_2_clusters_pivot) <- c("comparison", "gene", "p_value")
+
+g <- guide_legend("-log10(p-value)")
+
+balloon_plot <- ggplot(table_p_1_2_clusters_pivot, aes(x = factor(gene, levels = ordre_genes), y =  factor(comparison, levels = c("3_vs_4", "2_vs_4", "2_vs_3", "1_vs_4","1_vs_3", "1_vs_2")), fill = p_value, size = p_value)) +
+  scale_fill_continuous(palette = c("blue","blue","red"), guide = "legend") +
+  guides(fill = g, size = g) +
+  geom_point(shape = 21) +
+  theme_bw() +
+  theme(axis.text.x = element_text(color = "black", size = 15, angle = 90, hjust = .5, vjust = .5, face = "plain"),
+        axis.text.y = element_text(color = "black", size = 15, angle = 0, hjust = 1, vjust = 0, face = "plain"),
+        axis.title.x = element_text(color = "black", size = 0, angle = 0, hjust = .5, vjust = 0, face = "plain"),
+        axis.title.y = element_text(color = "black", size = 0, angle = 90, hjust = .5, vjust = .5, face = "plain")) +
+  annotate("rect", xmin = -Inf, xmax = 14.5, ymin = -1, ymax = 12, fill = "blue",
+             alpha = 0.2, color= "blue") +
+  annotate("rect", xmin = 14.5, xmax = 20.5, ymin = -1, ymax = 12, fill = "green",
+             alpha = 0.2, color= "green") +
+  annotate("rect", xmin = 20.5, xmax = Inf, ymin = -1, ymax = 12, fill = "red",
+             alpha = 0.2, color= "red")
+
+  
+# the figure is generated
+tiff(paste0(figure_directory,"/Figure_2C_statistics_milk_samples.tif"), width = 12, height = 4, units = "in", res = 150)
+balloon_plot
+dev.off()
+```
+
+
+### Figure 2B: PCA representation of results
+The results are then represented in the form of a PCA analysis.
+
+```{r}
+
+res.pca.milk.samples<- PCA(matrix_heatmap,
+                        graph = F)
+
+eig.val.gene.agg <- get_eigenvalue(res.pca.milk.samples)
+
+fviz_eig(res.pca.milk.samples, addlabels = TRUE, ylim = c(0, 60))
+ind <- get_pca_ind(res.pca.milk.samples)
+
+# color <- table_analyse$SCS
+# color <- table_analyse$Macrophage
+color <- as.factor(clusters_samples$Cluster_sample)
+# color <- as.factor(table_analyse$Type)
+
+pca_ind_plot <- fviz_pca_ind(res.pca.milk.samples,
+                             axes = c(1,2),
+                             # pointshape = as.factor(table_analyse$Cluster_4_samples),
+                             pointsize = 5,
+                             # col.ind = "cos2",
+                             col.ind=color,
+                             # fill.ind=color,
+                             # gradient.cols = c("green","blue","burlywood1","yellow"),
+                             # palette = c("blue","green","red"),
+                             palette = c("blue","cyan","burlywood1","red"),
+                             repel = TRUE, # Avoid text overlapping (slow if many points)
+                             addEllipses = T,
+                             ellipse.type = "confidence",
+                             ellipse.level=0.99,
+                             mean.point = FALSE,
+                             label = "none",
+                             title = "",
+                             legend.title = "Cluster") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 0, size=20),
+        axis.text.y = element_text(size = 20),
+        axis.title.x = element_text(size = 25),
+        axis.title.y = element_text(size = 25),
+        axis.title.x.top = element_text(size = 25),
+        strip.text = element_text(size = 15),
+        legend.title = element_text(size = 20),
+        legend.text = element_text(size = 15)
+  )
+
+```
+
+The PCA figure generated is saved to a tiff file.
+
+```{r}
+tiff(paste0(figure_directory,"/Figure_2B_PCA_milk_samples.tif"), width = 8.5, height = 8.5, units = "in", res = 150)
+pca_ind_plot
+dev.off()
+```
+
+### Figure 3: Dot plot of SCC values in the different milk sample clusters
+```{r}
+
+# A table is created that contains the name of samples, the quarter ID, the cluster ID and the SCC value
+table_histogramme <- table_log_fc[,is.element(colnames(table_log_fc),c("Name","Quarter","CCS"))]
+table_histogramme <- merge(table_histogramme, clusters_samples, by = "Quarter")
+
+
+#graphique CCS en fonction cluster####
+graph_CCS_cluster <- ggplot(table_histogramme, aes(x = factor(Cluster_sample), y= log(CCS), fill = factor(Cluster_sample))) +
+  geom_dotplot(binaxis = "y", stackdir = "center", alpha = 1, dotsize = 0.7) +
+  geom_segment(aes(x = 1, y = 9.4, xend = 4, yend = 9.4)) +
+  geom_segment(aes(x = 2, y = 9, xend = 4, yend = 9)) +
+  geom_segment(aes(x = 3, y = 8.6, xend = 4, yend = 8.6)) +
+  geom_segment(aes(x = 1, y = 8.2, xend = 3, yend = 8.2)) +
+  geom_segment(aes(x = 2, y = 7.8, xend = 3, yend = 7.8)) +
+  geom_text(x=2.5, y=9.6, label="*") +
+  geom_text(x=3, y=9.2, label="*") +
+  geom_text(x=3.5, y=8.8, label="*") +
+  geom_text(x=2, y=8.4, label="*") +
+  geom_text(x=2.5, y=8, label="*") +
+  xlab("Cluster") +
+  ylab("log(SCC)") +
+  scale_fill_manual(values = c("blue","cyan","burlywood1","red"),
+                    name = c("Cluster")) +
+  scale_y_continuous(limits = c(2,10),breaks=c(2,4,6,8,10)) +
+  theme(panel.background = element_rect(fill = "white", colour = "black"),
+        axis.text.x = element_text(angle = 0, hjust = 0.5, size=14),
+        axis.text.y = element_text(angle = 0, hjust = 0.5, size=14),
+        axis.title.y = element_text(angle = 90, hjust = 0.5, size=16),
+        axis.title.x = element_text(angle = 0, hjust = 0.5, size=16),
+        legend.text = element_text(angle = 0, hjust = 0, size=14),
+        legend.title = element_text(angle = 0, hjust = 0, size=16),
+        strip.background =element_rect(colour="white", fill="white"),
+        panel.grid = element_line(colour="transparent"),
+        panel.border = element_rect(colour="black", fill=NA),
+        panel.grid.major.x = element_line(colour="transparent"),
+        plot.title=element_text(angle = 0, hjust = 0.5, size=12, vjust = 0.5))
+
+#figure is generated
+tiff(paste0(figure_directory,"/Figure_3_CCS_distribution.tif"), width = 8.5, height = 8.5, units = "in", res = 150)
+graph_CCS_cluster
+dev.off()
+```
+
+
+
+### Figure 4: Comparison with flow cytometry data
+The clustering obtained with gene expression analysis is compared to that obtained with flow cytometry.
+
+```{r}
+# PCA analysis by cell types####
+matrix_pca <- table_log_fc[,c("Macro_num","Lympho_num","Neutro_num")]
+  
+rownames(matrix_pca) <- paste0(table_log_fc$Quarter,"_",table_log_fc$Type, "_", table_log_fc$Name)
+
+res.pca <- PCA(log(matrix_pca),
+                 graph = F)
+  
+eig.val <- get_eigenvalue(res.pca)
+
+fviz_eig(res.pca, addlabels = TRUE, ylim = c(0, 60))
+ind <- get_pca_ind(res.pca)
+
+color <- as.factor(table_log_fc$Cluster_sample)
+
+tiff(paste0(figure_directory,"/Figure_4_PCA_cytometry_w_cluster_pour_publi.tif"), width = 8.5, height = 8.5, units = "in", res = 150)
+
+fviz_pca_ind(res.pca,
+             axes = c(1,2),
+             # pointshape = as.factor(table_analyse$Cluster_3_samples),
+             pointsize = 5,
+             # col.ind = "cos2",
+             col.ind=color,
+             # fill.ind=color,
+             # gradient.cols = c("green","blue","burlywood1","yellow"),
+             # palette = c("blue","green","red"),
+             palette = c("blue","cyan","burlywood1","red"),
+             repel = TRUE, # Avoid text overlapping (slow if many points)
+             addEllipses = T,
+             ellipse.type = "confidence",
+             ellipse.level=0.99,
+             mean.point = FALSE,
+             label = "none",
+             title = paste0(" "),
+             legend.title = "Cluster") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=90, size=10),
+        axis.text.y = element_text(size=10),
+        axis.title.x = element_text(size=15),
+        axis.title.y = element_text(size=15),
+        axis.title.x.top = element_text(size=25),
+        strip.text = element_text(size=15),
+        legend.title = element_text(size=20),
+        legend.text = element_text(size=15)
+  )
+dev.off()
+
+####fin PCA####
+```
+
+
+## Part Three: Annalysis of correlations between sample clusters and metadata
+
+
+Create figure with the distribution of bacteriological analyses in the different clusters.
+
+```{r}
+
+#create table with clusters and bacteriology results
+table_bacterio <- table_log_fc[,is.element(colnames(table_log_fc),c("Name","Quarter","CCS", "Bacterio"))]
+table_bacterio <- merge(table_bacterio, clusters_samples, by = "Quarter")
+
+#generate graph
+graph_bacterio <- ggplot(table_bacterio, aes(x = factor(Cluster_sample), fill = factor(Bacterio))) +
+  geom_bar(color = "grey", alpha = 1) +
+  xlab("Sample clusters") +
+  scale_fill_manual(values = c("grey","purple","white", "pink"),
+                    name="Bacterio") +
+  theme(panel.background = element_rect(fill = "white", colour = "black"),
+        axis.text.x = element_text(angle = 0, hjust = 0.5, size=14),
+        axis.text.y = element_text(angle = 0, hjust = 0.5, size=14),
+        axis.title.y = element_text(angle = 90, hjust = 0.5, size=16),
+        axis.title.x = element_text(angle = 0, hjust = 0.5, size=16),
+        legend.text = element_text(angle = 0, hjust = 0, size=14),
+        legend.title = element_text(angle = 0, hjust = 0, size=16),
+        strip.background =element_rect(colour="white", fill="white"),
+        panel.grid = element_line(colour="transparent"),
+        panel.border = element_rect(colour="black", fill=NA),
+        panel.grid.major.x = element_line(colour="transparent"),
+        plot.title=element_text(angle = 0, hjust = 0.5, size=12, vjust = 0.5))
+
+tiff(paste0(figure_directory,"/Figure_5_cluster_bacterio.tif"), width = 8.5, height = 8.5, units = "in", res = 150)
+graph_bacterio
+dev.off()
+
+```
+
+A Likelyhood Ratio Test was performed on bacteriology results to detect if bacteriology results were significantly different among clusters.
+
+```{r}
+#create a table "dt" sumamrizing bacteriology results among clusters
+table_p_value <- table_bacterio[,c(4,5)]
+table_p_value <- table_p_value[!is.na(table_p_value$Bacterio),]
+
+dt <- as.table(as.matrix(table(table_p_value)))
+
+balloonplot(t(dt), main ="housetasks", xlab ="", ylab="",
+            label = FALSE, show.margins = FALSE)
+
+chisq <- chisq.test(as.matrix(table(table_p_value)))
+chisq
+
+GTest(as.matrix(table(table_p_value)))
+```
+
+
+
+
+### Histogram of milk sample clusters based on SCC values
+SCC values are indicated in the `table_log_fc table`.
+```{r}
+# A table is created that contains the name of samples, the quarter ID, the cluster ID and the SCC value
+table_histogramme <- table_log_fc[,is.element(colnames(table_log_fc),c("Name","Quarter","CCS"))]
+table_histogramme <- merge(table_histogramme, clusters_samples, by = "Quarter")
+
+
+histogram_CCS_clusters <- ggplot(table_histogramme, aes(x = CCS, fill = factor(Cluster_sample))) +
+  geom_histogram(color = "grey", alpha = 1, binwidth = 0.1) +
+  scale_x_log10(breaks = c(0,50,100,200,400,1000,4000)) +
+  xlab("SCC") +
+  scale_fill_manual(values = c("blue","cyan","burlywood1","red"),
+                    name = c("Sample clusters")) +
+  theme(panel.background = element_rect(fill = "white", colour = "black"),
+        axis.text.x = element_text(angle = 0, hjust = 0.5, size=14),
+        axis.text.y = element_text(angle = 0, hjust = 0.5, size=14),
+        axis.title.y = element_text(angle = 90, hjust = 0.5, size=16),
+        axis.title.x = element_text(angle = 0, hjust = 0.5, size=16),
+        legend.text = element_text(angle = 0, hjust = 0, size=14),
+        legend.title = element_text(angle = 0, hjust = 0, size=16),
+        strip.background =element_rect(colour="white", fill="white"),
+        panel.grid = element_line(colour="transparent"),
+        panel.border = element_rect(colour="black", fill=NA),
+        panel.grid.major.x = element_line(colour="transparent"),
+        plot.title=element_text(angle = 0, hjust = 0.5, size=12, vjust = 0.5))
+
+tiff(paste0(figure_directory,"/Figure_XX_distribution_SCC_clusters.tif"), width = 8.5, height = 4, units = "in", res = 150)
+print(histogram_CCS_clusters)
+dev.off()
+
+```
+
+
+
+
+
+### Distribution related to days-in-milk
+
+```{r}
+
+#create table with clusters and bacteriology results
+table_DIM <- table_log_fc[,is.element(colnames(table_log_fc),c("Name","Quarter","CCS", "Days_in_milk"))]
+table_DIM <- merge(table_DIM, clusters_samples, by = "Quarter")
+
+#generate graph
+graph_DIM <- ggplot(table_DIM, aes(x = Days_in_milk, fill = factor(Cluster_sample))) +
+  geom_histogram(color = "grey", alpha = 1) +
+  xlab("DIM") +
+  scale_fill_manual(values = c("blue","cyan","burlywood1","red"),
+                    name = c("Sample clusters")) +
+  theme(panel.background = element_rect(fill = "white", colour = "black"),
+        axis.text.x = element_text(angle = 0, hjust = 0.5, size=14),
+        axis.text.y = element_text(angle = 0, hjust = 0.5, size=14),
+        axis.title.y = element_text(angle = 90, hjust = 0.5, size=16),
+        axis.title.x = element_text(angle = 0, hjust = 0.5, size=16),
+        legend.text = element_text(angle = 0, hjust = 0, size=14),
+        legend.title = element_text(angle = 0, hjust = 0, size=16),
+        strip.background =element_rect(colour="white", fill="white"),
+        panel.grid = element_line(colour="transparent"),
+        panel.border = element_rect(colour="black", fill=NA),
+        panel.grid.major.x = element_line(colour="transparent"),
+        plot.title=element_text(angle = 0, hjust = 0.5, size=12, vjust = 0.5))
+
+tiff(paste0(figure_directory,"/Supplementary_Figure_S3_distribution_DIM_cluster.tif"), width = 8.5, height = 4, units = "in", res = 150)
+graph_DIM
+dev.off()
+```
+
+### Distribution SCC related to breed
+
+```{r}
+#create table
+table_SCC_breed <- table_log_fc[,is.element(colnames(table_log_fc),c("Name","Quarter","CCS", "Breed"))]
+
+#generate graph
+graph_breed <- ggplot(table_SCC_breed, aes(x = CCS, fill = factor(Breed))) +
+  geom_histogram(color = "black", alpha = 1, binwidth = 0.1) +
+  scale_x_log10() +
+  xlab("SCC") +
+  scale_fill_manual(values = c("grey","purple","white"),
+                    name="Breed") +
+  theme(panel.background = element_rect(fill = "white", colour = "black"),
+        axis.text.x = element_text(angle = 0, hjust = 0.5, size=14),
+        axis.text.y = element_text(angle = 0, hjust = 0.5, size=14),
+        axis.title.y = element_text(angle = 90, hjust = 0.5, size=16),
+        axis.title.x = element_text(angle = 0, hjust = 0.5, size=16),
+        legend.text = element_text(angle = 0, hjust = 0, size=14),
+        legend.title = element_text(angle = 0, hjust = 0, size=16),
+        strip.background =element_rect(colour="white", fill="white"),
+        panel.grid = element_line(colour="transparent"),
+        panel.border = element_rect(colour="black", fill=NA),
+        panel.grid.major.x = element_line(colour="transparent"),
+        plot.title=element_text(angle = 0, hjust = 0.5, size=12, vjust = 0.5))
+
+tiff(paste0(figure_directory,"/Supplementary_figure_S2_distribution_SCC_breed.tif"), width = 8.5, height = 4, units = "in", res = 150)
+graph_breed
+dev.off()
+
+
+```
+
+### Comparison of clustering obtained by flow cytometry and gene expression profile
+
+Then dendrogram from the analysis of gene expression data and flow cytometry data on milk composition are analyzed.
+
+```{r}
+dendro_expression <- p_milk_samples[[1]] %>%
+    as.dendrogram()
+
+#dendogramme cytometrie
+matrix_pca_cytometrie <- as.matrix(table_log_fc[,c("Macro_num","Lympho_num", "Neutro_num")])
+rownames(matrix_pca_cytometrie) <- table_log_fc$Quarter
+matrix_pca_cytometrie <- scale(matrix_pca_cytometrie)
+
+p_cytometrie <- pheatmap(matrix_pca_cytometrie,
+                           cutree_rows = 4,
+                           clustering_method="ward.D",
+                           clustering_distance_cols ="euclidean",
+                           clustering_distance_rows ="euclidean")
+dendro_cytometrie <- p_cytometrie[[1]] %>%
+    as.dendrogram()
+  
+# Compute distance matrix####
+
+#voir http://talgalili.github.io/dendextend/articles/dendextend.html
+# Create a list to hold dendrograms
+dend_list <- dendlist(dendro_expression, dendro_cytometrie)
+
+# Align and plot two dendrograms side by side
+set.seed(1)
+
+tiff(paste0(figure_directory,"/Figure_XX_tanglegram.tif"), width = 8.5, height = 8.5, units = "in", res = 150)
+dendlist(dendro_expression, dendro_cytometrie) %>%
+  untangle(method = "step2side") %>% # Find the best alignment layout
+  tanglegram(main_left = "dendrogramme expression",
+             main_right = "dendrogramme cytometrie",
+             columns_width = c(5,3,5),
+             margin_inner = 8,
+             cex_main = 1.5)
+
+
+
+dev.off()
+
+cor_bakers_gamma(dendro_expression, dendro_cytometrie)
+#Baker’s Gamma Index
+# 
+# Baker’s Gamma Index (see baker’s paper from 1974) is a measure of association (similarity) between two trees of Hierarchical clustering (dendrograms).
+# It is defined as the rank correlation between the stages at which pairs of objects combine in each of the two trees.
+# 
+# Or more detailed: It is calculated by taking two items, and see what is the highest possible level of k (number of cluster groups created when cutting the tree) for which the two item still belongs to the same tree.
+# That k is returned, and the same is done for these two items for the second tree.
+# There are n over 2 combinations of such pairs of items from the items in the tree, and all of these numbers are calculated for each of the two trees.
+# Then, these two sets of numbers (a set for the items in each tree) are paired according to the pairs of items compared, and a Spearman correlation is calculated.
+# 
+# The value can range between -1 to 1. With near 0 values meaning that the two trees are not statistically similar.
+# For exact p-value one should use a permutation test. One such option will be to permute over the labels of one tree many times, calculating the distribution under the null hypothesis (keeping the trees topologies constant).
+# 
+# Notice that this measure is not affected by the height of a branch but only of its relative position compared with other branches.
+
+
+set.seed(23235)
+the_cor <- cor_bakers_gamma(dendro_expression, dendro_expression)
+the_cor2 <- cor_bakers_gamma(dendro_expression, dendro_cytometrie)
+the_cor
+the_cor2
+
+
+R <- 1000
+cor_bakers_gamma_results <- numeric(R)
+dend_mixed <- dendro_expression
+for(i in 1:R) {
+  dend_mixed <- sample.dendrogram(dend_mixed, replace = FALSE)
+  cor_bakers_gamma_results[i] <- cor_bakers_gamma(dendro_expression, dend_mixed)
+}
+
+tiff(paste0(figure_directory,"/Supplementary_figure_S4_Baker_index.tif"), width = 8.5, height = 8.5, units = "in", res = 150)
+plot(density(cor_bakers_gamma_results),
+     main = "Baker's gamma distribution under H0",
+     xlim = c(-1,1))
+abline(v = 0, lty = 2)
+# abline(v = the_cor, lty = 2, col = 2)
+abline(v = the_cor2, lty = 2, col = 4)
+legend("topleft", legend = c("Baker's index"), fill = c(4))
+round(sum(the_cor2 < cor_bakers_gamma_results)/ R, 4)
+
+title(sub = paste("One sided p-value:", round(sum(the_cor2 < cor_bakers_gamma_results)/ R, 4))
+)
+
+dev.off()
+```
+
